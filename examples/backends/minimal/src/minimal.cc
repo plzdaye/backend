@@ -296,7 +296,7 @@ TRITONBACKEND_ModelInstanceExecute(
   // At this point, the backend takes ownership of 'requests', which
   // means that it is responsible for sending a response for every
   // request. From here, even if something goes wrong in processing,
-  // the backend must return 'nullptr' from the function to indicate
+  // the backend must return 'nullptr' from this function to indicate
   // success. Any errors and failures must be communicated via the
   // response objects.
   //

@@ -281,3 +281,5 @@ Description of following enhancements is under construction.
   way to include arbitrary, non-tensor information in a response.
 
 * Access model artifacts from the model repository.
+
+* Support GPUs.

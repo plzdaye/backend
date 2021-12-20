@@ -184,15 +184,25 @@ class ModelState : public BackendModel {
       TRITONBACKEND_Model* triton_model, ModelState** state);
   virtual ~ModelState() = default;
 
+  // Name of the input and output tensor
+  const std::string& InputTensorName() const { return input_name_; }
+  const std::string& OutputTensorName() const { return output_name_; }
+
+  // Shape of the input and output tensor as given in the model
+  // configuration file. This shape will not include the batch
+  // dimension (if the model has one).
+  const std::vector<int64_t>& TensorNonBatchShape() const { return nb_shape_; }
+
   // Validate that this model is supported by this backend.
   TRITONSERVER_Error* ValidateModelConfig();
 
  private:
   ModelState(TRITONBACKEND_Model* triton_model) : BackendModel(triton_model) {}
 
-  // Name of the input and output tensor
   std::string input_name_;
   std::string output_name_;
+
+  std::vector<int64_t> nb_shape_;
 };
 
 TRITONSERVER_Error*
@@ -249,43 +259,43 @@ ModelState::ValidateModelConfig()
   RETURN_IF_ERROR(input.MemberAsString("name", &input_name, &input_name_len));
   input_name_ = std::string(input_name);
 
-      const char* output_name;
-    size_t output_name_len;
-    RETURN_IF_ERROR(
-        output.MemberAsString("name", &output_name, &output_name_len));
+  const char* output_name;
+  size_t output_name_len;
+  RETURN_IF_ERROR(
+      output.MemberAsString("name", &output_name, &output_name_len));
   output_name_ = std::string(output_name);
 
   // Input and output must have same datatype
   std::string input_dtype, output_dtype;
   RETURN_IF_ERROR(input.MemberAsString("data_type", &input_dtype));
   RETURN_IF_ERROR(output.MemberAsString("data_type", &output_dtype));
-    RETURN_ERROR_IF_FALSE(
-        input_dtype == output_dtype,
-        TRITONSERVER_ERROR_INVALID_ARG,
-        std::string("expected input and output datatype to match, got ") +
-            input_dtype + " and " + output_dtype);
+  RETURN_ERROR_IF_FALSE(
+      input_dtype == output_dtype, TRITONSERVER_ERROR_INVALID_ARG,
+      std::string("expected input and output datatype to match, got ") +
+          input_dtype + " and " + output_dtype);
 
-    // Input and output must have same shape or reshaped shape
-    std::vector<int64_t> input_shape, output_shape;
-    triton::common::TritonJson::Value reshape;
-    if (input.Find("reshape", &reshape)) {
-      RETURN_IF_ERROR(backend::ParseShape(reshape, "shape", &input_shape));
-    } else {
-      RETURN_IF_ERROR(backend::ParseShape(input, "dims", &input_shape));
-    }
+  // Input and output must have same shape. Reshape is not supported
+  // on either input or output so flag an error is the model
+  // configuration uses it.
+  triton::common::TritonJson::Value reshape;
+  RETURN_ERROR_IF_TRUE(
+      input.Find("reshape", &reshape), TRITONSERVER_ERROR_UNSUPPORTED,
+      std::string("reshape not supported for input tensor"));
+  RETURN_ERROR_IF_TRUE(
+      output.Find("reshape", &reshape), TRITONSERVER_ERROR_UNSUPPORTED,
+      std::string("reshape not supported for output tensor"));
 
-    if (output.Find("reshape", &reshape)) {
-      RETURN_IF_ERROR(backend::ParseShape(reshape, "shape", &output_shape));
-    } else {
-      RETURN_IF_ERROR(backend::ParseShape(output, "dims", &output_shape));
-    }
+  std::vector<int64_t> input_shape, output_shape;
+  RETURN_IF_ERROR(backend::ParseShape(input, "dims", &input_shape));
+  RETURN_IF_ERROR(backend::ParseShape(output, "dims", &output_shape));
 
-    RETURN_ERROR_IF_FALSE(
-        input_shape == output_shape,
-        TRITONSERVER_ERROR_INVALID_ARG,
-        std::string("expected input and output shape to match, got ") +
-            backend::ShapeToString(input_shape) + " and " +
-            backend::ShapeToString(output_shape));
+  RETURN_ERROR_IF_FALSE(
+      input_shape == output_shape, TRITONSERVER_ERROR_INVALID_ARG,
+      std::string("expected input and output shape to match, got ") +
+          backend::ShapeToString(input_shape) + " and " +
+          backend::ShapeToString(output_shape));
+
+  nb_shape_ = input_shape;
 
   return nullptr;  // success
 }
@@ -351,31 +361,45 @@ class ModelInstanceState : public BackendModelInstance {
   static TRITONSERVER_Error* Create(
       ModelState* model_state,
       TRITONBACKEND_ModelInstance* triton_model_instance,
+      const bool supports_first_dim_batching, const std::vector<int64_t>& shape,
       ModelInstanceState** state);
   virtual ~ModelInstanceState() = default;
 
   // Get the state of the model that corresponds to this instance.
   ModelState* StateForModel() const { return model_state_; }
 
+  // Does model instance support batching along first dimension.
+  bool SupportsFirstDimBatching() const { return supports_first_dim_batching_; }
+
+  // Shape of the input and output tensor, including the batch
+  // dimension (if the model has one)
+  const std::vector<int64_t>& TensorShape() const { return shape_; }
+
  private:
   ModelInstanceState(
       ModelState* model_state,
-      TRITONBACKEND_ModelInstance* triton_model_instance)
+      TRITONBACKEND_ModelInstance* triton_model_instance,
+      const bool supports_first_dim_batching, const std::vector<int64_t>& shape)
       : BackendModelInstance(model_state, triton_model_instance),
-        model_state_(model_state)
+        model_state_(model_state),
+        supports_first_dim_batching_(supports_first_dim_batching), shape_(shape)
   {
   }
 
   ModelState* model_state_;
+  const bool supports_first_dim_batching_;
+  const std::vector<int64_t> shape_;
 };
 
 TRITONSERVER_Error*
 ModelInstanceState::Create(
     ModelState* model_state, TRITONBACKEND_ModelInstance* triton_model_instance,
+    const bool supports_first_dim_batching, const std::vector<int64_t>& shape,
     ModelInstanceState** state)
 {
   try {
-    *state = new ModelInstanceState(model_state, triton_model_instance);
+    *state = new ModelInstanceState(
+        model_state, triton_model_instance, supports_first_dim_batching, shape);
   }
   catch (const BackendModelInstanceException& ex) {
     RETURN_ERROR_IF_TRUE(
@@ -404,11 +428,33 @@ TRITONBACKEND_ModelInstanceInitialize(TRITONBACKEND_ModelInstance* instance)
   RETURN_IF_ERROR(TRITONBACKEND_ModelState(model, &vmodelstate));
   ModelState* model_state = reinterpret_cast<ModelState*>(vmodelstate);
 
+  // This backend supports models that batch along the first dimension
+  // and those that don't batch. For non-batch models the output shape
+  // will be the shape from the model configuration. For batch models
+  // the output shape will be the shape from the model configuration
+  // pre-pended with [ -1 ] to represent the batch dimension. The
+  // backend "responder" utility used below will set the appropriate
+  // batch dimension value for each response. The shape needs to be
+  // initialized here and not in TRITONBACKEND_ModelInitialize because
+  // the SupportsFirstDimBatching function cannot be used until the
+  // model is completely loaded.
+  std::vector<int64_t> shape;
+  bool supports_first_dim_batching;
+  RETURN_IF_ERROR(
+      model_state->SupportsFirstDimBatching(&supports_first_dim_batching));
+  if (supports_first_dim_batching) {
+    shape.push_back(-1);
+  }
+
+  const std::vector<int64_t>& nbshape = model_state->TensorNonBatchShape();
+  shape.insert(shape.end(), nbshape.begin(), nbshape.end());
+
   // Create a ModelInstanceState object and associate it with the
   // TRITONBACKEND_ModelInstance.
   ModelInstanceState* instance_state;
-  RETURN_IF_ERROR(
-      ModelInstanceState::Create(model_state, instance, &instance_state));
+  RETURN_IF_ERROR(ModelInstanceState::Create(
+      model_state, instance, supports_first_dim_batching, shape,
+      &instance_state));
   RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceSetState(
       instance, reinterpret_cast<void*>(instance_state)));
 
@@ -482,7 +528,7 @@ TRITONBACKEND_ModelInstanceExecute(
   // At this point, the backend takes ownership of 'requests', which
   // means that it is responsible for sending a response for every
   // request. From here, even if something goes wrong in processing,
-  // the backend must return 'nullptr' from the function to indicate
+  // the backend must return 'nullptr' from this function to indicate
   // success. Any errors and failures must be communicated via the
   // response objects.
   //
@@ -520,11 +566,10 @@ TRITONBACKEND_ModelInstanceExecute(
       requests, request_count, &responses, model_state->TritonMemoryManager(),
       false /* pinned_enabled */, nullptr /* stream*/);
 
-  // To instruct ProcessTensor to "gather" the entire batch of IN0
-  // input tensors into a single contiguous buffer in CPU memory, set
-  // the "allowed input types" to be the CPU ones (see tritonserver.h
-  // in the triton-inference-server/core repo for allowed memory
-  // types).
+  // To instruct ProcessTensor to "gather" the entire batch of input
+  // tensors into a single contiguous buffer in CPU memory, set the
+  // "allowed input types" to be the CPU ones (see tritonserver.h in
+  // the triton-inference-server/core repo for allowed memory types).
   std::vector<std::pair<TRITONSERVER_MemoryType, int64_t>> allowed_input_types =
       {{TRITONSERVER_MEMORY_CPU_PINNED, 0}, {TRITONSERVER_MEMORY_CPU, 0}};
 
@@ -536,7 +581,7 @@ TRITONBACKEND_ModelInstanceExecute(
   RESPOND_ALL_AND_RETURN_IF_ERROR(
       requests, request_count, responses,
       collector.ProcessTensor(
-          "IN0", nullptr /* existing_buffer */,
+          model_state->InputTensorName().c_str(), nullptr /* existing_buffer */,
           0 /* existing_buffer_byte_size */, allowed_input_types, &input_buffer,
           &input_buffer_byte_size, &input_buffer_memory_type,
           &input_buffer_memory_type_id));
@@ -553,10 +598,10 @@ TRITONBACKEND_ModelInstanceExecute(
         "'recommended' backend: unexpected CUDA sync required by collector");
   }
 
-  // 'input_buffer' contains the batched "IN0" tensor. The backend can
-  // implement whatever logic is necesary to produce "OUT0". This
-  // backend simply returns the IN0 value in OUT0 so no actual
-  // computation is needed.
+  // 'input_buffer' contains the batched input tensor. The backend can
+  // implement whatever logic is necesary to produce the output
+  // tensor. This backend simply returns the input tensor value in the
+  // output tensor so no actual computation is needed.
 
   LOG_MESSAGE(
       TRITONSERVER_LOG_INFO,
@@ -568,31 +613,18 @@ TRITONBACKEND_ModelInstanceExecute(
       tstr, input_buffer, input_buffer_byte_size, TRITONSERVER_TYPE_INT32));
   LOG_MESSAGE(
       TRITONSERVER_LOG_INFO,
-      (std::string("batched IN0 value: ") + tstr).c_str());
+      (std::string("batched " + model_state->InputTensorName() + " value: ") +
+       tstr)
+          .c_str());
 
   const char* output_buffer = input_buffer;
   TRITONSERVER_MemoryType output_buffer_memory_type = input_buffer_memory_type;
   int64_t output_buffer_memory_type_id = input_buffer_memory_type_id;
 
-  // This backend supports models that batch along the first dimension
-  // and those that don't batch. For non-batch models the output shape
-  // will be [ 4 ]. For batch models the output shape will be [ -1, 4
-  // ] and the backend "responder" utility below will set the
-  // appropriate batch dimension value for each response.
-  std::vector<int64_t> output_batch_shape;
-  bool supports_first_dim_batching;
-  RESPOND_ALL_AND_RETURN_IF_ERROR(
-      requests, request_count, responses,
-      model_state->SupportsFirstDimBatching(&supports_first_dim_batching));
-  if (supports_first_dim_batching) {
-    output_batch_shape.push_back(-1);
-  }
-  output_batch_shape.push_back(4);
-
-  // Because the OUT0 values are concatenated into a single contiguous
-  // 'output_buffer', the backend must "scatter" them out to the
-  // individual response OUT0 tensors.  The backend utilities provide
-  // a "responder" to facilitate this scattering process.
+  // Because the output tensor values are concatenated into a single
+  // contiguous 'output_buffer', the backend must "scatter" them out
+  // to the individual response output tensors.  The backend utilities
+  // provide a "responder" to facilitate this scattering process.
 
   // The 'responders's ProcessTensor function will copy the portion of
   // 'output_buffer' corresonding to each request's output into the
@@ -600,19 +632,21 @@ TRITONBACKEND_ModelInstanceExecute(
 
   BackendOutputResponder responder(
       requests, request_count, &responses, model_state->TritonMemoryManager(),
-      supports_first_dim_batching, false /* pinned_enabled */,
+      instance_state->SupportsFirstDimBatching(), false /* pinned_enabled */,
       nullptr /* stream*/);
 
+  auto tensor_shape = instance_state->TensorShape();
   responder.ProcessTensor(
-      "OUT0", TRITONSERVER_TYPE_INT32, output_batch_shape, output_buffer,
-      output_buffer_memory_type, output_buffer_memory_type_id);
+      model_state->OutputTensorName().c_str(), TRITONSERVER_TYPE_INT32,
+      tensor_shape, output_buffer, output_buffer_memory_type,
+      output_buffer_memory_type_id);
 
-  // Finalize the responder. If 'true' is returned, the OUT0
+  // Finalize the responder. If 'true' is returned, the output
   // tensors' data will not be valid until the backend synchronizes
   // the CUDA stream or event that was used when creating the
-  // responder. For this backend, GPU is not supported and so no
-  // CUDA sync should be needed; so if 'true' is returned simply log
-  // an error.
+  // responder. For this backend, GPU is not supported and so no CUDA
+  // sync should be needed; so if 'true' is returned simply log an
+  // error.
   const bool need_cuda_output_sync = responder.Finalize();
   if (need_cuda_output_sync) {
     LOG_MESSAGE(
