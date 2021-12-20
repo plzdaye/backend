@@ -246,9 +246,6 @@ which should be present in any robust backend implementation:
 * Enhances the backend to support models with input/output tensors
   that have any shape.
 
-* Uses TRITONBACKEND_ModelInstance object to manage per-model-instance
-  state.
-
 * Uses the Triton backend metric APIs to record statistics about
   requests executing in the backend. These metrics can then we queried
   using the Triton
@@ -256,9 +253,6 @@ which should be present in any robust backend implementation:
   and
   [statistics](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_statistics.md)
   APIs.
-
-* Demonstrates how to return key-value parameters in a response as a
-  way to include arbitrary, non-tensor information in a response.
 
 * Additional error checking to ensure that the backend's version is
   compatible with Triton and that each model's configuration is
@@ -279,4 +273,11 @@ the *Minimal* Backend](#building-the-minimal-backend).
 
 ### Enhancements
 
-Under construction.
+Description of following enhancements is under construction.
+
+* Automatically generate model configuration.
+
+* Demonstrates how to return key-value parameters in a response as a
+  way to include arbitrary, non-tensor information in a response.
+
+* Access model artifacts from the model repository.

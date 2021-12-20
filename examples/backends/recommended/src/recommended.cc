@@ -184,8 +184,15 @@ class ModelState : public BackendModel {
       TRITONBACKEND_Model* triton_model, ModelState** state);
   virtual ~ModelState() = default;
 
+  // Validate that this model is supported by this backend.
+  TRITONSERVER_Error* ValidateModelConfig();
+
  private:
   ModelState(TRITONBACKEND_Model* triton_model) : BackendModel(triton_model) {}
+
+  // Name of the input and output tensor
+  std::string input_name_;
+  std::string output_name_;
 };
 
 TRITONSERVER_Error*
@@ -200,6 +207,85 @@ ModelState::Create(TRITONBACKEND_Model* triton_model, ModelState** state)
         std::string("unexpected nullptr in BackendModelException"));
     RETURN_IF_ERROR(ex.err_);
   }
+
+  return nullptr;  // success
+}
+
+TRITONSERVER_Error*
+ModelState::ValidateModelConfig()
+{
+  // If verbose logging is enabled, dump the model's configuration as
+  // JSON into the console output.
+  if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_INFO)) {
+    common::TritonJson::WriteBuffer buffer;
+    RETURN_IF_ERROR(ModelConfig().PrettyWrite(&buffer));
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_VERBOSE,
+        (std::string("model configuration:\n") + buffer.Contents()).c_str());
+  }
+
+  // ModelConfig is the model configuration as a TritonJson
+  // object. Use the TritonJson utilities to parse the JSON and
+  // determine if the configuration is supported by this backend.
+  common::TritonJson::Value inputs, outputs;
+  RETURN_IF_ERROR(ModelConfig().MemberAsArray("input", &inputs));
+  RETURN_IF_ERROR(ModelConfig().MemberAsArray("output", &outputs));
+
+  // The model must have exactly 1 input and 1 output.
+  RETURN_ERROR_IF_FALSE(
+      inputs.ArraySize() == 1, TRITONSERVER_ERROR_INVALID_ARG,
+      std::string("model configuration must have 1 input"));
+  RETURN_ERROR_IF_FALSE(
+      outputs.ArraySize() == 1, TRITONSERVER_ERROR_INVALID_ARG,
+      std::string("model configuration must have 1 output"));
+
+  common::TritonJson::Value input, output;
+  RETURN_IF_ERROR(inputs.IndexAsObject(0, &input));
+  RETURN_IF_ERROR(outputs.IndexAsObject(0, &output));
+
+  // Record the input and output name in the model state.
+  const char* input_name;
+  size_t input_name_len;
+  RETURN_IF_ERROR(input.MemberAsString("name", &input_name, &input_name_len));
+  input_name_ = std::string(input_name);
+
+      const char* output_name;
+    size_t output_name_len;
+    RETURN_IF_ERROR(
+        output.MemberAsString("name", &output_name, &output_name_len));
+  output_name_ = std::string(output_name);
+
+  // Input and output must have same datatype
+  std::string input_dtype, output_dtype;
+  RETURN_IF_ERROR(input.MemberAsString("data_type", &input_dtype));
+  RETURN_IF_ERROR(output.MemberAsString("data_type", &output_dtype));
+    RETURN_ERROR_IF_FALSE(
+        input_dtype == output_dtype,
+        TRITONSERVER_ERROR_INVALID_ARG,
+        std::string("expected input and output datatype to match, got ") +
+            input_dtype + " and " + output_dtype);
+
+    // Input and output must have same shape or reshaped shape
+    std::vector<int64_t> input_shape, output_shape;
+    triton::common::TritonJson::Value reshape;
+    if (input.Find("reshape", &reshape)) {
+      RETURN_IF_ERROR(backend::ParseShape(reshape, "shape", &input_shape));
+    } else {
+      RETURN_IF_ERROR(backend::ParseShape(input, "dims", &input_shape));
+    }
+
+    if (output.Find("reshape", &reshape)) {
+      RETURN_IF_ERROR(backend::ParseShape(reshape, "shape", &output_shape));
+    } else {
+      RETURN_IF_ERROR(backend::ParseShape(output, "dims", &output_shape));
+    }
+
+    RETURN_ERROR_IF_FALSE(
+        input_shape == output_shape,
+        TRITONSERVER_ERROR_INVALID_ARG,
+        std::string("expected input and output shape to match, got ") +
+            backend::ShapeToString(input_shape) + " and " +
+            backend::ShapeToString(output_shape));
 
   return nullptr;  // success
 }
@@ -223,6 +309,10 @@ TRITONBACKEND_ModelInitialize(TRITONBACKEND_Model* model)
   RETURN_IF_ERROR(ModelState::Create(model, &model_state));
   RETURN_IF_ERROR(
       TRITONBACKEND_ModelSetState(model, reinterpret_cast<void*>(model_state)));
+
+  // Validate that the model's configuration matches what is supported
+  // by this backend.
+  RETURN_IF_ERROR(model_state->ValidateModelConfig());
 
   return nullptr;  // success
 }
