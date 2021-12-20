@@ -61,11 +61,11 @@ large number of features. The backend utilities and classes provide
 many functions commonly used when creating a backend. But to create a
 functional backend it is not necessary to use most of the backend API
 or utilities. The tutorial starts with an implementation that shows a
-minimal backend and then adds on recommended and optional
+*minimal* backend and then adds on recommended and optional
 enhancements. The tutorial implementations follow best practices for
 Triton backends and so can be used as templates for your own backend.
 
-### Minimal Triton Backend
+### *Minimal* Triton Backend
 
 The source code for the *minimal* backend is contained in
 [minimal.cc](backends/minimal/src/minimal.cc). The source code
@@ -84,16 +84,16 @@ demonstrate the basic organization required for a Triton backend.
 
 The *minimal* backend is complete but for clarity leaves out some
 important aspects of writing a full-featured backend that are
-described in [Recommended Triton
+described in [*Recommended* Triton
 Backend](#recommended-triton-backend). When creating your own backend
-use the [Recommended Triton Backend](#recommended-triton-backend) as a
-starting point.
+use the [*Recommended* Triton Backend](#recommended-triton-backend) as
+a starting point.
 
-#### Building the Backend
+#### Building the *Minimal* Backend
 
 [backends/minimal/CMakeLists.txt](backends/minimal/CMakeLists.txt)
 shows the recommended build and install script for a Triton
-backend. To build the minimal backend and install in a local directory
+backend. To build the *minimal* backend and install in a local directory
 use the following commands.
 
 ```
@@ -125,11 +125,11 @@ the following additional cmake flags:
 ```
 
 After building the install directory will contain a backends/minimal
-directory that contains the minimal backend. Instructions for adding
+directory that contains the *minimal* backend. Instructions for adding
 this backend to the Triton server are described in [Backend Shared
 Library](../README.md#backend-shared-library).
 
-#### Running Triton with the Minimal Backend
+#### Running Triton with the *Minimal* Backend
 
 After adding the *minimal* backend to the Triton server as described
 in [Backend Shared Library](../README.md#backend-shared-library), you
@@ -168,12 +168,12 @@ delay](https://github.com/triton-inference-server/server/blob/main/docs/model_co
 to 5 seconds so that the example client described below can
 demonstrate how the *minimal* backend receives a batch of requests.
 
-#### Testing the Backend
+#### Testing the *Minimal* Backend
 
 The [clients](clients) directory holds example clients. The
 [minimal_client](clients/minimal_client) Python script demonstrates
 sending a couple of inference requests to the *minimal* backend. With
-Triton running as described in [Running Triton with the Minimal
+Triton running as described in [Running Triton with the *Minimal*
 Backend](#running-triton-with-the-minimal-backend), execute the
 client:
 
@@ -223,9 +223,59 @@ I1216 23:39:46.479728 460 minimal.cc:376] model batching: requests in batch 2
 I1216 23:39:46.479770 460 minimal.cc:384] batched IN0 value: [ 10, 11, 12, 13, 20, 21, 22, 23 ]
 ```
 
-### Recommended Triton Backend
+### *Recommended* Triton Backend
 
-Under construction.
+The source code for the *recommended* backend is contained in
+[recommended.cc](backends/recommended/src/recommended.cc). The source
+code contains extensive documentation describing the operation of the
+backend and the use of the [Triton Backend
+API](../README.md#triton-backend-api) and the backend
+utilities. Before reading the source code, make sure you understand
+the concepts associated with Triton backend abstractions
+[TRITONBACKEND_Backend](../README.md#tritonbackend-backend),
+[TRITONBACKEND_Model](../README.md#tritonbackend-model), and
+[TRITONBACKEND_ModelInstance](../README.md#tritonbackend-modelinstance).
+
+The *recommended* backend improves the [*minimal*
+backend](#minimal-triton-backend) to include the following features
+which should be present in any robust backend implementation:
+
+* Enhances the backend to support models with input/output tensors
+  that have datatypes other than INT32.
+
+* Enhances the backend to support models with input/output tensors
+  that have any shape.
+
+* Uses TRITONBACKEND_ModelInstance object to manage per-model-instance
+  state.
+
+* Uses the Triton backend metric APIs to record statistics about
+  requests executing in the backend. These metrics can then we queried
+  using the Triton
+  [metrics](https://github.com/triton-inference-server/server/blob/main/docs/metrics.md)
+  and
+  [statistics](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_statistics.md)
+  APIs.
+
+* Demonstrates how to return key-value parameters in a response as a
+  way to include arbitrary, non-tensor information in a response.
+
+* Additional error checking to ensure that the backend's version is
+  compatible with Triton and that each model's configuration is
+  compatible with the backend.
+
+As with the *minimal* backend, the *recommended* backend just returns
+the input tensor value in the output tensor. Because of the additions
+described above, the *recommended* backend can serve as a starting
+point for your backend.
+
+#### Building the *Recommended* Backend
+
+[backends/recommended/CMakeLists.txt](backends/recommended/CMakeLists.txt)
+shows the recommended build and install script for a Triton
+backend. Building and installing is the same as decribed in [Building
+the *Minimal* Backend](#building-the-minimal-backend).
+
 
 ### Enhancements
 
