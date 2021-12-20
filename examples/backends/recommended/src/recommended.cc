@@ -61,15 +61,111 @@ namespace triton { namespace backend { namespace recommended {
 
 
 //
-// Recommended backend that demonstrates the TRITONBACKEND API. This
-// backend works for any model that has 1 input called "IN0" with
-// INT32 datatype and shape [ 4 ] and 1 output called "OUT0" with
-// INT32 datatype and shape [ 4 ]. The backend supports both batching
-// and non-batching models.
+// Backend that demonstrates the TRITONBACKEND API. This backend works
+// for any model that has 1 input with any datatype and any shape and
+// 1 output with the same shape and datatype as the input. The backend
+// supports both batching and non-batching models.
 //
 // For each batch of requests, the backend returns the input tensor
 // value in the output tensor.
 //
+
+/////////////
+
+extern "C" {
+
+// Triton calls TRITONBACKEND_Initialize when a backend is loaded into
+// Triton to allow the backend to create and initialize any state that
+// is intended to be shared across all models and model instances that
+// use the backend. The backend should also verify version
+// compatibility with Triton in this function.
+//
+TRITONSERVER_Error*
+TRITONBACKEND_Initialize(TRITONBACKEND_Backend* backend)
+{
+  const char* cname;
+  RETURN_IF_ERROR(TRITONBACKEND_BackendName(backend, &cname));
+  std::string name(cname);
+
+  LOG_MESSAGE(
+      TRITONSERVER_LOG_INFO,
+      (std::string("TRITONBACKEND_Initialize: ") + name).c_str());
+
+  // Check the backend API version that Triton supports vs. what this
+  // backend was compiled against. Make sure that the Triton major
+  // version is the same and the minor version is >= what this backend
+  // uses.
+  uint32_t api_version_major, api_version_minor;
+  RETURN_IF_ERROR(
+      TRITONBACKEND_ApiVersion(&api_version_major, &api_version_minor));
+
+  LOG_MESSAGE(
+      TRITONSERVER_LOG_INFO,
+      (std::string("Triton TRITONBACKEND API version: ") +
+       std::to_string(api_version_major) + "." +
+       std::to_string(api_version_minor))
+          .c_str());
+  LOG_MESSAGE(
+      TRITONSERVER_LOG_INFO,
+      (std::string("'") + name + "' TRITONBACKEND API version: " +
+       std::to_string(TRITONBACKEND_API_VERSION_MAJOR) + "." +
+       std::to_string(TRITONBACKEND_API_VERSION_MINOR))
+          .c_str());
+
+  if ((api_version_major != TRITONBACKEND_API_VERSION_MAJOR) ||
+      (api_version_minor < TRITONBACKEND_API_VERSION_MINOR)) {
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_UNSUPPORTED,
+        "triton backend API version does not support this backend");
+  }
+
+  // The backend configuration may contain information needed by the
+  // backend, such as tritonserver command-line arguments. This
+  // backend doesn't use any such configuration but for this example
+  // print whatever is available.
+  TRITONSERVER_Message* backend_config_message;
+  RETURN_IF_ERROR(
+      TRITONBACKEND_BackendConfig(backend, &backend_config_message));
+
+  const char* buffer;
+  size_t byte_size;
+  RETURN_IF_ERROR(TRITONSERVER_MessageSerializeToJson(
+      backend_config_message, &buffer, &byte_size));
+  LOG_MESSAGE(
+      TRITONSERVER_LOG_INFO,
+      (std::string("backend configuration:\n") + buffer).c_str());
+
+  // This backend does not require any "global" state but as an
+  // example create a string to demonstrate.
+  std::string* state = new std::string("backend state");
+  RETURN_IF_ERROR(
+      TRITONBACKEND_BackendSetState(backend, reinterpret_cast<void*>(state)));
+
+  return nullptr;  // success
+}
+
+// Triton calls TRITONBACKEND_Finalize when a backend is no longer
+// needed.
+//
+TRITONSERVER_Error*
+TRITONBACKEND_Finalize(TRITONBACKEND_Backend* backend)
+{
+  // Delete the "global" state associated with the backend.
+  void* vstate;
+  RETURN_IF_ERROR(TRITONBACKEND_BackendState(backend, &vstate));
+  std::string* state = reinterpret_cast<std::string*>(vstate);
+
+  LOG_MESSAGE(
+      TRITONSERVER_LOG_INFO,
+      (std::string("TRITONBACKEND_Finalize: state is '") + *state + "'")
+          .c_str());
+
+  delete state;
+
+  return nullptr;  // success
+}
+
+}  // extern "C"
 
 /////////////
 
