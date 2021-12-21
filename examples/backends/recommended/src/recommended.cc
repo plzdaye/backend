@@ -33,33 +33,6 @@
 
 namespace triton { namespace backend { namespace recommended {
 
-// FIXME this should be replaced by a common macro from the backend utilities
-#define RESPOND_ALL_AND_RETURN_IF_ERROR(REQUESTS, REQUEST_COUNT, RESPONSES, S) \
-  do {                                                                         \
-    TRITONSERVER_Error* raarie_err__ = (S);                                    \
-    if (raarie_err__ != nullptr) {                                             \
-      for (uint32_t r = 0; r < REQUEST_COUNT; ++r) {                           \
-        TRITONBACKEND_Response* response = (RESPONSES)[r];                     \
-        if (response != nullptr) {                                             \
-          LOG_IF_ERROR(                                                        \
-              TRITONBACKEND_ResponseSend(                                      \
-                  response, TRITONSERVER_RESPONSE_COMPLETE_FINAL,              \
-                  raarie_err__),                                               \
-              "failed to send response");                                      \
-          (RESPONSES)[r] = nullptr;                                            \
-        }                                                                      \
-        LOG_IF_ERROR(                                                          \
-            TRITONBACKEND_RequestRelease(                                      \
-                REQUESTS[r], TRITONSERVER_REQUEST_RELEASE_ALL),                \
-            "failed releasing request");                                       \
-        REQUESTS[r] = nullptr;                                                 \
-      }                                                                        \
-      TRITONSERVER_ErrorDelete(raarie_err__);                                  \
-      return nullptr;                                                          \
-    }                                                                          \
-  } while (false)
-
-
 //
 // Backend that demonstrates the TRITONBACKEND API. This backend works
 // for any model that has 1 input with any datatype and any shape and
@@ -188,6 +161,9 @@ class ModelState : public BackendModel {
   const std::string& InputTensorName() const { return input_name_; }
   const std::string& OutputTensorName() const { return output_name_; }
 
+  // Datatype of the input and output tensor
+  TRITONSERVER_DataType TensorDataType() const { return datatype_; }
+
   // Shape of the input and output tensor as given in the model
   // configuration file. This shape will not include the batch
   // dimension (if the model has one).
@@ -208,6 +184,8 @@ class ModelState : public BackendModel {
 
   std::string input_name_;
   std::string output_name_;
+
+  TRITONSERVER_DataType datatype_;
 
   bool shape_initialized_;
   std::vector<int64_t> nb_shape_;
@@ -318,6 +296,7 @@ ModelState::ValidateModelConfig()
       input_dtype == output_dtype, TRITONSERVER_ERROR_INVALID_ARG,
       std::string("expected input and output datatype to match, got ") +
           input_dtype + " and " + output_dtype);
+  datatype_ = ModelConfigDataTypeToTritonServerDataType(input_dtype);
 
   // Input and output must have same shape. Reshape is not supported
   // on either input or output so flag an error is the model
@@ -498,6 +477,13 @@ TRITONBACKEND_ModelInstanceExecute(
     TRITONBACKEND_ModelInstance* instance, TRITONBACKEND_Request** requests,
     const uint32_t request_count)
 {
+  // Collect various timestamps during the execution of this batch or
+  // requests. These values are reported below before returning from
+  // the function.
+
+  uint64_t exec_start_ns = 0;
+  SET_TIMESTAMP(exec_start_ns);
+
   // Triton will not call this function simultaneously for the same
   // 'instance'. But since this backend could be used by multiple
   // instances from multiple models the implementation needs to handle
@@ -544,8 +530,11 @@ TRITONBACKEND_ModelInstanceExecute(
   // and the corresponding TRITONBACKEND_Response object within
   // 'responses' is set to nullptr to indicate that the
   // request/response has already been handled an no futher processing
-  // should be performed for that
-  // request. RESPOND_ALL_AND_RETURN_IF_ERROR,
+  // should be performed for that request. Even if all responses fail,
+  // the backend still allowed execution to flow to the end of the
+  // function so that statistics are correctly reported by the calls
+  // to TRITONBACKEND_ModelInstanceReportStatistics and
+  // TRITONBACKEND_ModelInstanceReportBatchStatistics.
   // RESPOND_AND_SET_NULL_IF_ERROR, and
   // RESPOND_ALL_AND_SET_NULL_IF_ERROR are macros from
   // backend_common.h that assist in this management of response
@@ -583,8 +572,8 @@ TRITONBACKEND_ModelInstanceExecute(
   TRITONSERVER_MemoryType input_buffer_memory_type;
   int64_t input_buffer_memory_type_id;
 
-  RESPOND_ALL_AND_RETURN_IF_ERROR(
-      requests, request_count, responses,
+  RESPOND_ALL_AND_SET_NULL_IF_ERROR(
+      responses, request_count,
       collector.ProcessTensor(
           model_state->InputTensorName().c_str(), nullptr /* existing_buffer */,
           0 /* existing_buffer_byte_size */, allowed_input_types, &input_buffer,
@@ -604,9 +593,13 @@ TRITONBACKEND_ModelInstanceExecute(
   }
 
   // 'input_buffer' contains the batched input tensor. The backend can
-  // implement whatever logic is necesary to produce the output
-  // tensor. This backend simply returns the input tensor value in the
-  // output tensor so no actual computation is needed.
+  // implement whatever logic is necessary to produce the output
+  // tensor. This backend simply logs the input tensor value and then
+  // returns the input tensor value in the output tensor so no actual
+  // computation is needed.
+
+  uint64_t compute_start_ns = 0;
+  SET_TIMESTAMP(compute_start_ns);
 
   LOG_MESSAGE(
       TRITONSERVER_LOG_INFO,
@@ -615,7 +608,8 @@ TRITONBACKEND_ModelInstanceExecute(
           .c_str());
   std::string tstr;
   IGNORE_ERROR(BufferAsTypedString(
-      tstr, input_buffer, input_buffer_byte_size, TRITONSERVER_TYPE_INT32));
+      tstr, input_buffer, input_buffer_byte_size,
+      model_state->TensorDataType()));
   LOG_MESSAGE(
       TRITONSERVER_LOG_INFO,
       (std::string("batched " + model_state->InputTensorName() + " value: ") +
@@ -626,15 +620,17 @@ TRITONBACKEND_ModelInstanceExecute(
   TRITONSERVER_MemoryType output_buffer_memory_type = input_buffer_memory_type;
   int64_t output_buffer_memory_type_id = input_buffer_memory_type_id;
 
+  uint64_t compute_end_ns = 0;
+  SET_TIMESTAMP(compute_end_ns);
+
   bool supports_first_dim_batching;
-  RESPOND_ALL_AND_RETURN_IF_ERROR(
-      requests, request_count, responses,
+  RESPOND_ALL_AND_SET_NULL_IF_ERROR(
+      responses, request_count,
       model_state->SupportsFirstDimBatching(&supports_first_dim_batching));
 
   std::vector<int64_t> tensor_shape;
-  RESPOND_ALL_AND_RETURN_IF_ERROR(
-      requests, request_count, responses,
-      model_state->TensorShape(tensor_shape));
+  RESPOND_ALL_AND_SET_NULL_IF_ERROR(
+      responses, request_count, model_state->TensorShape(tensor_shape));
 
   // Because the output tensor values are concatenated into a single
   // contiguous 'output_buffer', the backend must "scatter" them out
@@ -651,7 +647,7 @@ TRITONBACKEND_ModelInstanceExecute(
       nullptr /* stream*/);
 
   responder.ProcessTensor(
-      model_state->OutputTensorName().c_str(), TRITONSERVER_TYPE_INT32,
+      model_state->OutputTensorName().c_str(), model_state->TensorDataType(),
       tensor_shape, output_buffer, output_buffer_memory_type,
       output_buffer_memory_type_id);
 
@@ -679,13 +675,69 @@ TRITONBACKEND_ModelInstanceExecute(
     }
   }
 
-  // Done with the request objects so release them.
+  uint64_t exec_end_ns = 0;
+  SET_TIMESTAMP(exec_end_ns);
+
+#ifdef TRITON_ENABLE_STATS
+  // For batch statistics need to know the total batch size of the
+  // requests. This is not necessarily just the number of requests,
+  // because if the model supports batching then any request can be a
+  // batched request itself.
+  size_t total_batch_size = 0;
+  if (!supports_first_dim_batching) {
+    total_batch_size = request_count;
+  } else {
+    for (uint32_t r = 0; r < request_count; ++r) {
+      auto& request = requests[r];
+      TRITONBACKEND_Input* input = nullptr;
+      LOG_IF_ERROR(
+          TRITONBACKEND_RequestInputByIndex(request, 0 /* index */, &input),
+          "failed getting request input");
+      if (input != nullptr) {
+        const int64_t* shape = nullptr;
+        LOG_IF_ERROR(
+            TRITONBACKEND_InputProperties(
+                input, nullptr, nullptr, &shape, nullptr, nullptr, nullptr),
+            "failed getting input properties");
+        if (shape != nullptr) {
+          total_batch_size += shape[0];
+        }
+      }
+    }
+  }
+#else
+  (void)exec_start_ns;
+  (void)exec_end_ns;
+  (void)compute_start_ns;
+  (void)compute_end_ns;
+#endif  // TRITON_ENABLE_STATS
+
+  // Report statistics for each request, and then release the request.
   for (uint32_t r = 0; r < request_count; ++r) {
     auto& request = requests[r];
+
+#ifdef TRITON_ENABLE_STATS
+    LOG_IF_ERROR(
+        TRITONBACKEND_ModelInstanceReportStatistics(
+            instance_state->TritonModelInstance(), request,
+            (responses[r] != nullptr) /* success */, exec_start_ns,
+            compute_start_ns, compute_end_ns, exec_end_ns),
+        "failed reporting request statistics");
+#endif  // TRITON_ENABLE_STATS
+
     LOG_IF_ERROR(
         TRITONBACKEND_RequestRelease(request, TRITONSERVER_REQUEST_RELEASE_ALL),
         "failed releasing request");
   }
+
+#ifdef TRITON_ENABLE_STATS
+  // Report the entire batch statistics.
+  LOG_IF_ERROR(
+      TRITONBACKEND_ModelInstanceReportBatchStatistics(
+          instance_state->TritonModelInstance(), total_batch_size,
+          exec_start_ns, compute_start_ns, compute_end_ns, exec_end_ns),
+      "failed reporting batch request statistics");
+#endif  // TRITON_ENABLE_STATS
 
   return nullptr;  // success
 }
